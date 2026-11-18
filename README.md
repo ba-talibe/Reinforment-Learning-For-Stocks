@@ -1,84 +1,131 @@
 # Reinforcement Learning for Stocks
 
-This repository is an early-stage project for exploring financial data and
-reinforcement learning. At present, it contains a data-processing notebook and
-an installable Python package namespace. It does not yet contain a working
-trading environment, an RL agent, or a training pipeline.
+This repository explores historical stock-market data and reinforcement
+learning. Its main Python component is an **offline data pipeline for DQN and
+Double DQN experiments**: it downloads price data, computes features and
+CVaR-based labels, and builds PyTorch transition datasets.
+
+The package does not currently provide a trading simulator, implemented agent
+classes, or a complete training/evaluation workflow. The notebooks contain
+experiments and prototypes and may require additional code or cleanup to run
+from start to finish.
 
 > **Disclaimer:** This project is for research and educational purposes only.
-> It is not financial advice. Historical data and notebook experiments do not
-> guarantee future results.
+> It is not financial advice. Historical data and experimental results do not
+> guarantee future performance.
 
 ## Repository contents
 
 ```text
 .
+├── data/
+│   ├── data_forex.csv
+│   └── indicators_eurusd.csv
 ├── notebooks/
 │   └── Stocks Data processing.ipynb
+├── Environment_modeling.ipynb
 ├── rl_stocks/
-│   ├── agents/
-│   │   └── __init__.py
-│   ├── environments/
-│   │   └── __init__.py
-│   └── __init__.py
-├── environment.yml
-├── pyproject.toml
-└── setup.py
+│   ├── agents/                 # Placeholder
+│   ├── environments/           # Placeholder
+│   └── utils/
+│       ├── data.py             # Data loading, reshaping, merging, scaling
+│       ├── indicators.py       # Technical indicators, CVaR and action labels
+│       ├── pipeline.py         # End-to-end data preparation
+│       ├── transitions.py      # CVaR rewards and PyTorch Dataset
+│       └── validation.py       # Data integrity checks
+└── tests/
+    └── test_pipeline.py
 ```
 
-The `rl_stocks.agents` and `rl_stocks.environments` packages are currently
-placeholders; no agent or environment classes are implemented yet. There is
-also no test suite at this stage.
+## Data pipeline
 
-## Data-processing notebook
+The pipeline in `rl_stocks.utils.pipeline` performs these steps:
 
-[`notebooks/Stocks Data processing.ipynb`](notebooks/Stocks%20Data%20processing.ipynb)
-is the main runnable project component. It:
+1. Downloads OHLCV prices for the requested tickers and market indices from
+   Yahoo Finance.
+2. Computes daily returns and technical indicators with TA-Lib.
+3. Calculates rolling CVaR and derives Hold, Buy, and Sell labels by comparing
+   short- and long-horizon CVaR.
+4. Aligns features, labels, and CVaR by date and ticker, checks the data, and
+   scales feature columns.
+5. Builds offline `(state, action, reward, next_state, done)` samples in a
+   PyTorch `Dataset`.
 
-1. Downloads approximately three years of historical data from Yahoo Finance
-   for EUR/USD, gold futures, crude oil futures, and the VIX.
-2. Combines the downloaded series.
-3. Calculates technical indicators for EUR/USD, including MACD, RSI, CCI, ADX,
-   stochastic %K, Williams %R, Bollinger Bands, EMA, ATR, SAR, lagged closes,
-   moving averages, and rolling standard deviations.
-4. Applies log and Min-Max transformations to market price/volume columns,
-   removes highly correlated indicator columns, standardizes the remaining
-   indicators, and plots the EUR/USD closing price.
+This is an offline dataset builder, not a simulator: the actions are generated
+from the CVaR comparison rather than chosen by an agent interacting with an
+environment. The transition and reward assumptions are documented in
+`rl_stocks.utils.transitions`.
 
-The download step requires an internet connection and availability of the
-Yahoo Finance data source. Run the notebook with its working directory set to
-`notebooks/`.
+### Example
+
+Install the package and its runtime dependencies as described below, then:
+
+```python
+from datetime import date, timedelta
+from torch.utils.data import DataLoader
+
+from rl_stocks.utils.pipeline import prepare_training_data
+
+tickers = ["AAPL", "MSFT", "NVDA"]
+end = date.today()
+start = end - timedelta(days=365 * 5)
+
+prepared = prepare_training_data(
+    tickers,
+    start,
+    end,
+    sequence_length=10,
+)
+
+dataset = prepared["dataset"]
+loader = DataLoader(dataset, batch_size=32, shuffle=True)
+print("State shape:", dataset.state_shape)
+print("Number of samples:", len(dataset))
+```
+
+`prepare_training_data` uses the S&P 500 (`^GSPC`) and VIX (`^VIX`) as market
+tickers by default. It returns intermediate dataframes, the fitted scaler,
+feature column names, action counts, and the final dataset.
+
+For reliable out-of-sample evaluation, split data chronologically and fit
+preprocessing only on training data. The current end-to-end helper scales all
+rows it receives, so using it before a train/test split can leak information
+from the test period.
 
 ## Setup
 
-The repository includes a Conda environment specification named `stocks`:
+The package requires Python 3.10 or later. From the repository root, create
+and activate an environment, then install the dependencies and this package:
 
 ```bash
-conda env create --file environment.yml
-conda activate stocks
-```
-
-Install the local Python package in editable mode:
-
-```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install numpy pandas scikit-learn torch yfinance TA-Lib
 python -m pip install -e .
 ```
 
-The package configuration currently declares no runtime dependencies. The
-notebook imports pandas, NumPy, yfinance, pandas-datareader, TA-Lib,
-scikit-learn, Matplotlib, and Plotly; install any missing notebook packages
-into the active environment before running it. JupyterLab is also needed to
-launch the notebook.
-
-To open the notebook from the project root:
+The package metadata does not yet declare its runtime dependencies, so they
+must be installed separately. TA-Lib may require platform-specific system
+libraries. JupyterLab is needed to run the notebooks:
 
 ```bash
-cd notebooks
-jupyter lab "Stocks Data processing.ipynb"
+python -m pip install jupyterlab
+jupyter lab
 ```
 
-## Current status
+The repository also includes an `environment.yml` Conda specification; review
+its platform-specific pins before using it on another machine.
 
-Data collection and indicator preparation are represented in the notebook.
-Trading simulation, agent implementations, model training, backtesting, and
-automated tests remain future work.
+## Notebooks and tests
+
+- `Environment_modeling.ipynb` and
+  `notebooks/Stocks Data processing.ipynb` contain data-processing and
+  environment-related experiments.
+- Some notebook cells refer to agent or environment code that is not currently
+  implemented in the package.
+
+Run the automated pipeline tests from the repository root with:
+
+```bash
+python -m pytest
+```
