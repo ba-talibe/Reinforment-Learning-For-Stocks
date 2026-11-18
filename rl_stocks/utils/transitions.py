@@ -1,7 +1,28 @@
-"""Reinforcement-learning transitions built from the prepared datasets.
+"""Transitions for DQN / DDQN agents, built from the prepared datasets.
 
-Functional replacement of the notebook's ``CVaRDataset`` class: every sample is
-a ``(state, action, reward, next_state, done)`` transition where
+Scope: this module is NOT a generic RL toolkit. In RL the data format depends
+on the problem, the environment and the algorithm; everything here is designed
+for **value-based, off-policy agents (DQN and Double DQN)** under these
+assumptions:
+
+- **Environment**: historical and offline. There is no simulator; the agent
+  does not choose the actions stored in the transitions. Actions are the
+  CVaR labels (10-day vs 30-day CVaR), so the agent learns Q-values for
+  pre-computed decisions, like a replay buffer filled in advance.
+- **Action space**: discrete, one action per ticker in {0 = Hold, 1 = Buy,
+  2 = Sell}. A Q-network therefore outputs ``n_tickers x 3`` values.
+- **Reward**: per ticker, derived from that day's CVaR (``compute_cvar_reward``).
+- **State**: features of all tickers over a fixed window of past days.
+- **Episode**: the whole history is one episode; ``done`` is 1 only on the
+  last transition (used in the target ``r + gamma * (1 - done) * max Q(s', .)``).
+
+Policy-gradient or actor-critic methods (PPO, A2C, SAC, ...) need an
+interactive environment and on-policy rollouts, and would require a different
+pipeline (e.g. a gym-style environment in ``rl_stocks.environments``).
+
+The functions build the transitions as numpy arrays; ``CVaRDataset`` wraps
+them in a PyTorch ``Dataset``. Every sample is a
+``(state, action, reward, next_state, done)`` transition where
 
 - ``state``      = features of all tickers over ``sequence_length`` days,
                    shape ``(sequence_length, n_indicators * n_tickers)``
@@ -15,7 +36,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import TensorDataset
+from torch.utils.data import Dataset
 
 from rl_stocks.utils.indicators import BUY, HOLD, SELL
 
@@ -146,15 +167,71 @@ def build_transitions(
     }
 
 
-def transitions_to_tensor_dataset(transitions: dict) -> TensorDataset:
-    """Wrap the transitions in a ``TensorDataset`` usable by a ``DataLoader``.
+class CVaRDataset(Dataset):
+    """Offline replay data for DQN / DDQN training, ready for a ``DataLoader``.
 
-    Each item is ``(state, action, reward, next_state, done)``.
+    Plays the role of a pre-filled replay buffer: sampling with
+    ``DataLoader(dataset, shuffle=True)`` gives the decorrelated mini-batches
+    DQN / DDQN expect. See the module docstring for the environment
+    assumptions (offline, discrete actions per ticker, CVaR reward).
+
+    Each item is a tuple of float32 tensors::
+
+        state       (sequence_length, n_indicators * n_tickers)
+        action      (n_tickers,)   0 = Hold, 1 = Buy, 2 = Sell
+        reward      (n_tickers,)
+        next_state  (sequence_length, n_indicators * n_tickers)
+        done        (n_tickers,)   1.0 only on the last transition
+
+    :param feature_df: long DataFrame ``Date, Ticker`` + scaled indicator columns.
+    :param action_labels_df: long DataFrame ``Date, Ticker, Action``.
+    :param aligned_cvar_df: long DataFrame ``Date, Ticker, CVaR``.
+    :param sequence_length: number of past days in each state.
+    :param normalize_cvar_for_reward: use min-max normalized CVaR in the
+        reward (old notebook behaviour) instead of the raw CVaR.
     """
-    return TensorDataset(
-        torch.from_numpy(transitions["states"]),
-        torch.from_numpy(transitions["actions"]),
-        torch.from_numpy(transitions["rewards"]),
-        torch.from_numpy(transitions["next_states"]),
-        torch.from_numpy(transitions["dones"]),
-    )
+
+    def __init__(
+        self,
+        feature_df: pd.DataFrame,
+        action_labels_df: pd.DataFrame,
+        aligned_cvar_df: pd.DataFrame,
+        sequence_length: int = 10,
+        normalize_cvar_for_reward: bool = False,
+    ):
+        self.sequence_length = sequence_length
+
+        rl_transitions = build_transitions(
+            feature_df,
+            action_labels_df,
+            aligned_cvar_df,
+            sequence_length=sequence_length,
+            normalize_cvar_for_reward=normalize_cvar_for_reward,
+        )
+
+        self.tickers = rl_transitions["tickers"]
+        self.n_tickers = len(self.tickers)
+        self.dates = rl_transitions["dates"]
+
+        self.states = torch.from_numpy(rl_transitions["states"])
+        self.actions = torch.from_numpy(rl_transitions["actions"])
+        self.rewards = torch.from_numpy(rl_transitions["rewards"])
+        self.next_states = torch.from_numpy(rl_transitions["next_states"])
+        self.dones = torch.from_numpy(rl_transitions["dones"])
+
+    @property
+    def state_shape(self) -> tuple[int, int]:
+        """Shape of one state: ``(sequence_length, n_indicators * n_tickers)``."""
+        return tuple(self.states.shape[1:])
+
+    def __len__(self) -> int:
+        return len(self.states)
+
+    def __getitem__(self, idx: int):
+        return (
+            self.states[idx],
+            self.actions[idx],
+            self.rewards[idx],
+            self.next_states[idx],
+            self.dones[idx],
+        )
